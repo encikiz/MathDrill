@@ -1,4 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import WorksheetsView from '../views/WorksheetsView.vue'
+import WorksheetDetailView from '../views/WorksheetDetailView.vue'
 import HomeView from '../views/HomeView.vue'
 
 const router = createRouter({
@@ -6,6 +8,16 @@ const router = createRouter({
   routes: [
     {
       path: '/',
+      name: 'worksheets',
+      component: WorksheetsView,
+    },
+    {
+      path: '/worksheet/:id',
+      name: 'worksheet-detail',
+      component: WorksheetDetailView,
+    },
+    {
+      path: '/legacy',
       name: 'home',
       component: HomeView,
     },

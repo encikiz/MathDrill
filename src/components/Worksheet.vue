@@ -16,13 +16,13 @@
       <div class="score-field">
         <label>Score:</label>
         <span class="score" :class="{ 'has-score': score !== null }">
-          {{ score !== null ? score : '___' }}/12
+          {{ score !== null ? score : '___' }}/{{ worksheetData.questions ? worksheetData.questions.length : '?' }}
         </span>
       </div>
     </div>
 
-    <div class="progress-bar" v-if="score !== null">
-      <div class="progress-fill" :style="{ width: `${(score / 12) * 100}%` }"></div>
+    <div class="progress-bar" v-if="score !== null && worksheetData.questions">
+      <div class="progress-fill" :style="{ width: `${(score / worksheetData.questions.length) * 100}%` }"></div>
     </div>
 
     <p class="instructions">Circle the correct answers.</p>
@@ -64,8 +64,10 @@
       <button @click="resetWorksheet" class="btn btn-secondary reset-btn">
         <span class="btn-icon">↺</span> Reset
       </button>
-      <button @click="calculateScore" class="btn btn-primary submit-btn">
-        <span class="btn-icon">✓</span> Submit
+      <button @click="calculateScore" class="btn btn-primary submit-btn" :disabled="isSubmitting">
+        <span v-if="isSubmitting" class="loading-spinner-small"></span>
+        <span v-else class="btn-icon">✓</span>
+        {{ isSubmitting ? 'Submitting...' : 'Submit' }}
       </button>
     </div>
 
@@ -74,63 +76,148 @@
         <div class="result-icon">{{ getScoreIcon() }}</div>
         <div class="result-text">
           <h3>{{ getScoreMessage() }}</h3>
-          <p>You got {{ score }} out of 12 questions correct.</p>
+          <p>You got {{ score }} out of {{ worksheetData.questions ? worksheetData.questions.length : '?' }} questions correct.</p>
         </div>
       </div>
     </div>
 
-    <div class="copyright">
+    <div class="copyright" v-if="worksheetData.copyright">
       <a :href="'https://' + worksheetData.copyright" target="_blank">{{ worksheetData.copyright }}</a>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
-import worksheetData from '../data/worksheetData';
+import { ref, computed, onMounted, defineProps, watch } from 'vue';
+import { useWorksheetStore } from '@/stores/worksheet';
+import { useScoreStore } from '@/stores/score';
+import { useRoute, useRouter } from 'vue-router';
+
+const props = defineProps({
+  worksheetId: {
+    type: String,
+    default: ''
+  }
+});
+
+const route = useRoute();
+const router = useRouter();
+const worksheetStore = useWorksheetStore();
+const scoreStore = useScoreStore();
 
 const studentName = ref('');
-const selectedAnswers = ref<number[]>(Array(worksheetData.questions.length).fill(null));
+const selectedAnswers = ref<number[]>([]);
 const score = ref<number | null>(null);
+const startTime = ref<number | null>(null);
+const endTime = ref<number | null>(null);
+const timeSpent = ref<number>(0);
+const isSubmitting = ref(false);
 
-const calculateScore = () => {
+// Get the worksheet data from the store
+const worksheetData = computed(() => worksheetStore.currentWorksheet || {
+  title: 'Loading...',
+  questions: [],
+  copyright: ''
+});
+
+// Initialize selected answers when worksheet changes
+watch(() => worksheetData.value, (newWorksheet) => {
+  if (newWorksheet && newWorksheet.questions) {
+    selectedAnswers.value = Array(newWorksheet.questions.length).fill(null);
+    score.value = null;
+    startTime.value = Date.now();
+  }
+}, { immediate: true });
+
+const calculateScore = async () => {
   if (!studentName.value.trim()) {
     alert('Please enter your name before submitting.');
     return;
   }
 
-  let correctCount = 0;
+  if (!worksheetData.value || !worksheetData.value.questions) {
+    return;
+  }
 
-  worksheetData.questions.forEach((question, index) => {
-    if (selectedAnswers.value[index] === question.correctAnswer) {
-      correctCount++;
+  isSubmitting.value = true;
+
+  try {
+    // Get the worksheet with answers for verification
+    const worksheetWithAnswers = await worksheetStore.fetchWorksheetWithAnswers(
+      props.worksheetId || route.params.id as string
+    );
+
+    if (!worksheetWithAnswers) {
+      alert('Failed to verify answers. Please try again.');
+      isSubmitting.value = false;
+      return;
     }
-  });
 
-  // Set the score
-  score.value = correctCount;
+    let correctCount = 0;
 
-  // Add animation to the score display
-  setTimeout(() => {
-    const scoreElement = document.querySelector('.score');
-    if (scoreElement) {
-      scoreElement.classList.add('score-animation');
+    // Calculate the score
+    worksheetWithAnswers.questions.forEach((question, index) => {
+      const selectedOption = selectedAnswers.value[index];
+      if (selectedOption !== null && question.options[selectedOption] === question.correctAnswer) {
+        correctCount++;
+      }
+    });
 
-      // Remove the animation class after it completes
-      setTimeout(() => {
-        scoreElement.classList.remove('score-animation');
-      }, 1000);
+    // Set the score
+    score.value = correctCount;
+
+    // Calculate time spent
+    endTime.value = Date.now();
+    if (startTime.value) {
+      timeSpent.value = Math.floor((endTime.value - startTime.value) / 1000);
     }
-  }, 100);
+
+    // Submit the score to the backend
+    await scoreStore.submitScore({
+      userName: studentName.value,
+      score: correctCount,
+      totalQuestions: worksheetWithAnswers.questions.length,
+      worksheetId: props.worksheetId || route.params.id as string,
+      timeSpent: timeSpent.value
+    });
+
+    // Add animation to the score display
+    setTimeout(() => {
+      const scoreElement = document.querySelector('.score');
+      if (scoreElement) {
+        scoreElement.classList.add('score-animation');
+
+        // Remove the animation class after it completes
+        setTimeout(() => {
+          scoreElement.classList.remove('score-animation');
+        }, 1000);
+      }
+    }, 100);
+
+    // Refresh the leaderboard
+    if (props.worksheetId || route.params.id) {
+      await scoreStore.fetchScoresByWorksheet(props.worksheetId || route.params.id as string);
+    }
+  } catch (error) {
+    console.error('Error calculating score:', error);
+    alert('An error occurred while calculating your score. Please try again.');
+  } finally {
+    isSubmitting.value = false;
+  }
 };
 
 const resetWorksheet = () => {
   studentName.value = '';
-  selectedAnswers.value = Array(worksheetData.questions.length).fill(null);
+  if (worksheetData.value && worksheetData.value.questions) {
+    selectedAnswers.value = Array(worksheetData.value.questions.length).fill(null);
+  }
   score.value = null;
+  startTime.value = Date.now();
+  endTime.value = null;
+  timeSpent.value = 0;
 };
 
-const animateSelection = (questionIndex, optionIndex) => {
+const animateSelection = (questionIndex: number, optionIndex: number) => {
   // This function will be used to add visual feedback when an option is selected
   const optionElements = document.querySelectorAll(`.question-container:nth-child(${questionIndex + 1}) .option-label`);
 
@@ -147,28 +234,48 @@ const animateSelection = (questionIndex, optionIndex) => {
 
 // Functions for the result message
 const getScoreClass = () => {
-  if (score.value === null) return '';
-  if (score.value >= 10) return 'excellent';
-  if (score.value >= 7) return 'good';
-  if (score.value >= 4) return 'average';
+  if (score.value === null || !worksheetData.value || !worksheetData.value.questions) return '';
+
+  const totalQuestions = worksheetData.value.questions.length;
+  const percentage = (score.value / totalQuestions) * 100;
+
+  if (percentage >= 80) return 'excellent';
+  if (percentage >= 60) return 'good';
+  if (percentage >= 40) return 'average';
   return 'needs-improvement';
 };
 
 const getScoreIcon = () => {
-  if (score.value === null) return '';
-  if (score.value >= 10) return '🏆';
-  if (score.value >= 7) return '👍';
-  if (score.value >= 4) return '🔍';
+  if (score.value === null || !worksheetData.value || !worksheetData.value.questions) return '';
+
+  const totalQuestions = worksheetData.value.questions.length;
+  const percentage = (score.value / totalQuestions) * 100;
+
+  if (percentage >= 80) return '🏆';
+  if (percentage >= 60) return '👍';
+  if (percentage >= 40) return '🔍';
   return '📚';
 };
 
 const getScoreMessage = () => {
-  if (score.value === null) return '';
-  if (score.value >= 10) return 'Excellent work!';
-  if (score.value >= 7) return 'Good job!';
-  if (score.value >= 4) return 'Keep practicing!';
+  if (score.value === null || !worksheetData.value || !worksheetData.value.questions) return '';
+
+  const totalQuestions = worksheetData.value.questions.length;
+  const percentage = (score.value / totalQuestions) * 100;
+
+  if (percentage >= 80) return 'Excellent work!';
+  if (percentage >= 60) return 'Good job!';
+  if (percentage >= 40) return 'Keep practicing!';
   return 'Let\'s study more!';
 };
+
+// Fetch the worksheet data when the component is mounted
+onMounted(async () => {
+  if (props.worksheetId || route.params.id) {
+    await worksheetStore.fetchWorksheetById(props.worksheetId || route.params.id as string);
+    startTime.value = Date.now();
+  }
+});
 </script>
 
 <style scoped>
@@ -492,6 +599,21 @@ button {
 
 .copyright a:hover {
   color: var(--primary-color);
+}
+
+.loading-spinner-small {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top-color: white;
+  animation: spin 1s linear infinite;
+  margin-right: var(--spacing-xs);
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 /* Responsive styles */
